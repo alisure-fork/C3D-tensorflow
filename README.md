@@ -5,6 +5,11 @@ Be aware that there are about 5% video-level accuracy margin on UCF101 split1  b
 
 ## Requirements:
 
+```
+安装ffmpeg。
+安装jot命令：sudo apt-get install athena-jot
+```
+
 1. Have installed the tensorflow >= 1.2 version
 2. You must have installed the following two python libs:
 a) [tensorflow][1]
