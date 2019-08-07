@@ -14,21 +14,28 @@ class DataUCF101(object):
     NUM_CLASSES = 101
     CROP_SIZE = 112
     CHANNELS = 3
-    NUM_FRAMES_PER_CLIP = 16
+    FRAMES = 16
 
-    def __init__(self, filename, batch_size):
+    def __init__(self, train_filename, test_filename, batch_size, crop_mean='./list/crop_mean.npy'):
         self.batch_size = batch_size
-        self.lines = list(open(filename, 'r'))
-        self.batch_num = len(self.lines) // self.batch_size
-        self.np_mean = np.load('./list/crop_mean.npy').reshape([self.NUM_FRAMES_PER_CLIP,
-                                                                self.CROP_SIZE, self.CROP_SIZE, 3])
+
+        self.train_lines = list(open(train_filename, 'r'))
+        self.train_batch_num = len(self.train_lines) // self.batch_size
+
+        self.test_lines = list(open(test_filename, 'r'))
+        self.test_batch_num = len(self.test_lines) // self.batch_size
+
+        self.np_mean = np.load(crop_mean).reshape([self.FRAMES, self.CROP_SIZE, self.CROP_SIZE, 3])
         pass
 
-    def video_generator_train(self):
+    def video_generator(self, is_train=True):
+        lines = self.train_lines if is_train else self.test_lines
+        video_indices = list(range(len(lines)))
+
         while True:
-            video_indices = list(range(len(self.lines)))
-            random.seed(time.time())
-            random.shuffle(video_indices)
+            if is_train:
+                random.seed(time.time())
+                random.shuffle(video_indices)
 
             batch_data, batch_label = [], []
             for video_index in video_indices:
@@ -37,36 +44,17 @@ class DataUCF101(object):
                     batch_data, batch_label = [], []
                     pass
 
-                dir_name, tmp_label = self.lines[video_index].strip('\n').split()
-                tmp_data, _ = self.get_frames_data(dir_name, self.NUM_FRAMES_PER_CLIP)
+                dir_name, tmp_label = lines[video_index].strip('\n').split()
+                tmp_data, _ = self.get_frames_data(dir_name, self.FRAMES)
                 if len(tmp_data) != 0:
                     img_data = self.deal_data(tmp_data, self.CROP_SIZE, self.np_mean)
                     batch_data.append(img_data)
                     batch_label.append(int(tmp_label))
                     pass
-
-                pass
-            pass
-        pass
-
-    def video_generator_test(self):
-        video_indices = list(range(len(self.lines)))
-
-        batch_data, batch_label = [], []
-        for video_index in video_indices:
-            if len(batch_data) == self.batch_size:
-                yield (np.array(batch_data).astype(np.float32), np.array(batch_label).astype(np.int64))
-                batch_data, batch_label = [], []
                 pass
 
-            dir_name, tmp_label = self.lines[video_index].strip('\n').split()
-            tmp_data, _ = self.get_frames_data(dir_name, self.NUM_FRAMES_PER_CLIP)
-            if len(tmp_data) != 0:
-                img_data = self.deal_data(tmp_data, self.CROP_SIZE, self.np_mean)
-                batch_data.append(img_data)
-                batch_label.append(int(tmp_label))
-                pass
-
+            if not is_train:
+                break
             pass
         pass
 
@@ -90,15 +78,15 @@ class DataUCF101(object):
         return img_data
 
     @staticmethod
-    def get_frames_data(filename, num_frames_per_clip):
+    def get_frames_data(filename, frames):
         ret_arr = []
         s_index = 0
         for parent, _, file_names in os.walk(filename):
-            if len(file_names) < num_frames_per_clip:
+            if len(file_names) < frames:
                 return [], s_index
             file_names = sorted(file_names)
-            s_index = random.randint(0, len(file_names) - num_frames_per_clip)
-            for i in range(s_index, s_index + num_frames_per_clip):
+            s_index = random.randint(0, len(file_names) - frames)
+            for i in range(s_index, s_index + frames):
                 image_name = os.path.join(filename, file_names[i])
                 img_data = np.array(Image.open(image_name))
                 ret_arr.append(img_data)
@@ -185,8 +173,7 @@ class TrainC3D(object):
         self.batch_size = batch_size
         self.max_epochs = max_epochs
 
-        _shape = (batch_size, self.data.NUM_FRAMES_PER_CLIP,
-                  self.data.CROP_SIZE, self.data.CROP_SIZE, self.data.CHANNELS)
+        _shape = (batch_size, self.data.FRAMES, self.data.CROP_SIZE, self.data.CROP_SIZE, self.data.CHANNELS)
         self.images_placeholder = tf.placeholder(tf.float32, _shape)
         self.labels_placeholder = tf.placeholder(tf.int64, shape=(self.batch_size,))
         self.global_step = tf.get_variable('global_step', [], initializer=tf.constant_initializer(0), trainable=False)
@@ -222,18 +209,14 @@ class TrainC3D(object):
 
         self.logits = C3D.inference_c3d(self.images_placeholder, 0.5, self.batch_size, self.weights, self.biases)
         self.pred = tf.argmax(self.logits, 1)
-        self.loss = TrainC3D.cal_loss(self.labels_placeholder, self.logits)
-        self.accuracy = TrainC3D.cal_acc(self.pred, self.labels_placeholder)
+        self.loss = self.cal_loss(self.labels_placeholder, self.logits)
+        self.accuracy = self.cal_acc(self.pred, self.labels_placeholder)
         self.train_op = tf.train.AdamOptimizer(1e-4).minimize(self.loss, global_step=self.global_step)
-
-        # summary 1
         self.summary_op = tf.summary.merge_all()
 
         self.sess = tf.Session(config=tf.ConfigProto(gpu_options=tf.GPUOptions(allow_growth=True)))
         self.sess.run(tf.global_variables_initializer())
         self.saver = tf.train.Saver(var_list=tf.global_variables(), max_to_keep=5)
-
-        # summary 2
         self.summary_writer = tf.summary.FileWriter(self.log_dir, self.sess.graph)
         pass
 
@@ -241,24 +224,23 @@ class TrainC3D(object):
         self.load_model()
         self.test()
 
-        data_train = self.data(filename='list/train.list', batch_size=self.batch_size)
-        train_data = data_train.video_generator_train()
+        video_generator = data.video_generator(is_train=True)
         for epoch in range(self.max_epochs):
             total_acc = 0
             total_loss = 0
-            for step in range(data_train.batch_num):
-                train_images, train_labels = next(train_data)
+            for step in range(data.train_batch_num):
+                train_images, train_labels = next(video_generator)
                 _loss, summary, acc, _, _pred = self.sess.run(
                     [self.loss, self.summary_op, self.accuracy, self.train_op, self.pred],
                     feed_dict={self.images_placeholder: train_images, self.labels_placeholder: train_labels})
                 total_acc += acc
                 total_loss += _loss
-                self.summary_writer.add_summary(summary, epoch * data_train.batch_num + step)
+                self.summary_writer.add_summary(summary, epoch * data.train_batch_num + step)
 
                 if step % 10 == 0:
                     Tools.print("{}/{} {}/{} acc={:.5f} avg_loss={:.5f} loss={:.5f}".format(
-                        epoch, self.max_epochs, step, data_train.batch_num,
-                        total_acc/((step + 1) * self.batch_size), total_loss/(step + 1), _loss))
+                        epoch, self.max_epochs, step, data.train_batch_num,
+                        total_acc/(step + 1), total_loss/(step + 1), _loss))
                     Tools.print("Train preds {}".format(_pred))
                     Tools.print("Train label {}".format(train_labels))
                     pass
@@ -270,21 +252,18 @@ class TrainC3D(object):
         pass
 
     def test(self):
-        data_test = self.data(filename='list/test.list', batch_size=self.batch_size)
-        test_data = data_test.video_generator_test()
-
         step = 0
         total_acc = 0
-        for step in range(data_test.batch_num):
+        video_generator = data.video_generator(is_train=False)
+        for step in range(data.test_batch_num):
             try:
-                val_images, val_labels = next(test_data)
-                summary, acc, _pred = self.sess.run([self.summary_op, self.accuracy, self.pred],
-                                                    feed_dict={self.images_placeholder: val_images,
-                                                               self.labels_placeholder: val_labels})
+                val_images, val_labels = next(video_generator)
+                acc, _pred = self.sess.run([self.accuracy, self.pred], feed_dict={self.images_placeholder: val_images,
+                                                                                  self.labels_placeholder: val_labels})
                 total_acc += acc
 
                 if step % 10 == 0:
-                    Tools.print("Test {}/{} {:.5f}".format(step, data_test.batch_num, total_acc/(step + 1)))
+                    Tools.print("Test {}/{} {:.5f}".format(step, data.test_batch_num, total_acc/(step + 1)))
                     Tools.print("Test preds {}".format(_pred))
                     Tools.print("Test label {}".format(val_labels))
             except StopIteration:
@@ -343,4 +322,6 @@ class TrainC3D(object):
 
 if __name__ == '__main__':
     os.environ["CUDA_VISIBLE_DEVICES"] = "1"  # 1
-    TrainC3D(run_name="demo", batch_size=10, max_epochs=500, data=DataUCF101).train()
+    batch_size = 10
+    data = DataUCF101(train_filename='./list/train.list', test_filename='./list/test.list', batch_size=batch_size)
+    TrainC3D(run_name="first", batch_size=batch_size, max_epochs=50, data=data).train()
