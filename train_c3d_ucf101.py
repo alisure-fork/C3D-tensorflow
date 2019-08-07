@@ -99,16 +99,55 @@ class C3D(object):
 
     @staticmethod
     def conv3d(name, l_input, w, b):
-        return tf.nn.bias_add(tf.nn.conv3d(l_input, w, strides=[1, 1, 1, 1, 1], padding='SAME'), b)
+        return tf.nn.bias_add(tf.nn.conv3d(l_input, w, strides=[1, 1, 1, 1, 1], padding='SAME', name=name), b)
 
     @staticmethod
     def max_pool(name, l_input, k):
         return tf.nn.max_pool3d(l_input, ksize=[1, k, 2, 2, 1], strides=[1, k, 2, 2, 1], padding='SAME', name=name)
 
+    @staticmethod
+    def _variable_with_weight_decay(name, shape, wd):
+        with tf.device('/cpu:0'):
+            var = tf.get_variable(name, shape, initializer=tf.contrib.layers.xavier_initializer())
+        if wd is not None:
+            weight_decay = tf.nn.l2_loss(var) * wd
+            tf.add_to_collection('weight_decay_losses', weight_decay)
+        return var
+
     @classmethod
-    def inference_c3d(cls, _X, _dropout, batch_size, _weights, _biases):
+    def inference_c3d(cls, _x, _dropout, class_num):
+
+        with tf.variable_scope('var_name'):
+            _weights = {
+                'wc1': cls._variable_with_weight_decay('wc1', [3, 3, 3, 3, 64], 0.0005),
+                'wc2': cls._variable_with_weight_decay('wc2', [3, 3, 3, 64, 128], 0.0005),
+                'wc3a': cls._variable_with_weight_decay('wc3a', [3, 3, 3, 128, 256], 0.0005),
+                'wc3b': cls._variable_with_weight_decay('wc3b', [3, 3, 3, 256, 256], 0.0005),
+                'wc4a': cls._variable_with_weight_decay('wc4a', [3, 3, 3, 256, 512], 0.0005),
+                'wc4b': cls._variable_with_weight_decay('wc4b', [3, 3, 3, 512, 512], 0.0005),
+                'wc5a': cls._variable_with_weight_decay('wc5a', [3, 3, 3, 512, 512], 0.0005),
+                'wc5b': cls._variable_with_weight_decay('wc5b', [3, 3, 3, 512, 512], 0.0005),
+                'wd1': cls._variable_with_weight_decay('wd1', [8192, 4096], 0.0005),
+                'wd2': cls._variable_with_weight_decay('wd2', [4096, 4096], 0.0005),
+                'out': cls._variable_with_weight_decay('wout', [4096, class_num], 0.0005)
+            }
+            _biases = {
+                'bc1': cls._variable_with_weight_decay('bc1', [64], 0.000),
+                'bc2': cls._variable_with_weight_decay('bc2', [128], 0.000),
+                'bc3a': cls._variable_with_weight_decay('bc3a', [256], 0.000),
+                'bc3b': cls._variable_with_weight_decay('bc3b', [256], 0.000),
+                'bc4a': cls._variable_with_weight_decay('bc4a', [512], 0.000),
+                'bc4b': cls._variable_with_weight_decay('bc4b', [512], 0.000),
+                'bc5a': cls._variable_with_weight_decay('bc5a', [512], 0.000),
+                'bc5b': cls._variable_with_weight_decay('bc5b', [512], 0.000),
+                'bd1': cls._variable_with_weight_decay('bd1', [4096], 0.000),
+                'bd2': cls._variable_with_weight_decay('bd2', [4096], 0.000),
+                'out': cls._variable_with_weight_decay('bout', [class_num], 0.000),
+            }
+            pass
+
         # Convolution Layer
-        conv1 = cls.conv3d('conv1', _X, _weights['wc1'], _biases['bc1'])
+        conv1 = cls.conv3d('conv1', _x, _weights['wc1'], _biases['bc1'])
         conv1 = tf.nn.relu(conv1, 'relu1')
         pool1 = cls.max_pool('pool1', conv1, k=1)
 
@@ -140,7 +179,7 @@ class C3D(object):
 
         # Fully connected layer
         pool5 = tf.transpose(pool5, perm=[0, 1, 4, 2, 3])
-        dense1 = tf.reshape(pool5, [batch_size, _weights['wd1'].get_shape().as_list()[0]])
+        dense1 = tf.reshape(pool5, [-1, _weights['wd1'].get_shape().as_list()[0]])
         dense1 = tf.matmul(dense1, _weights['wd1']) + _biases['bd1']
 
         dense1 = tf.nn.relu(dense1, name='fc1')  # Relu activation
@@ -159,61 +198,37 @@ class C3D(object):
 
 class TrainC3D(object):
 
-    def __init__(self, run_name, batch_size, max_epochs, data, log_dir='./logs', model_dir="./models",
-                 model_name="./c3d_ucf_model", pretrain=None):
-
+    def __init__(self, run_name, batch_size, max_epochs, data, net, log_dir='./logs', model_dir="./models",
+                 model_name="./c3d_ucf_model", pre_train=None):
         self.run_name = run_name
         self.model_name = model_name
         self.model_dir = Tools.new_dir(os.path.join(model_dir, self.run_name))
         self.checkpoint_path = os.path.join(self.model_dir, self.model_name)
         self.log_dir = Tools.new_dir(os.path.join(log_dir, self.run_name))
-        self.pretrain = pretrain
+        self.pre_train = pre_train
 
         self.data = data
         self.batch_size = batch_size
         self.max_epochs = max_epochs
 
+        # Input
         _shape = (batch_size, self.data.FRAMES, self.data.CROP_SIZE, self.data.CROP_SIZE, self.data.CHANNELS)
         self.images_placeholder = tf.placeholder(tf.float32, _shape)
         self.labels_placeholder = tf.placeholder(tf.int64, shape=(self.batch_size,))
-        self.global_step = tf.get_variable('global_step', [], initializer=tf.constant_initializer(0), trainable=False)
 
-        with tf.variable_scope('var_name'):
-            self.weights = {
-                'wc1': self._variable_with_weight_decay('wc1', [3, 3, 3, 3, 64], 0.0005),
-                'wc2': self._variable_with_weight_decay('wc2', [3, 3, 3, 64, 128], 0.0005),
-                'wc3a': self._variable_with_weight_decay('wc3a', [3, 3, 3, 128, 256], 0.0005),
-                'wc3b': self._variable_with_weight_decay('wc3b', [3, 3, 3, 256, 256], 0.0005),
-                'wc4a': self._variable_with_weight_decay('wc4a', [3, 3, 3, 256, 512], 0.0005),
-                'wc4b': self._variable_with_weight_decay('wc4b', [3, 3, 3, 512, 512], 0.0005),
-                'wc5a': self._variable_with_weight_decay('wc5a', [3, 3, 3, 512, 512], 0.0005),
-                'wc5b': self._variable_with_weight_decay('wc5b', [3, 3, 3, 512, 512], 0.0005),
-                'wd1': self._variable_with_weight_decay('wd1', [8192, 4096], 0.0005),
-                'wd2': self._variable_with_weight_decay('wd2', [4096, 4096], 0.0005),
-                'out': self._variable_with_weight_decay('wout', [4096, self.data.NUM_CLASSES], 0.0005)
-            }
-            self.biases = {
-                'bc1': self._variable_with_weight_decay('bc1', [64], 0.000),
-                'bc2': self._variable_with_weight_decay('bc2', [128], 0.000),
-                'bc3a': self._variable_with_weight_decay('bc3a', [256], 0.000),
-                'bc3b': self._variable_with_weight_decay('bc3b', [256], 0.000),
-                'bc4a': self._variable_with_weight_decay('bc4a', [512], 0.000),
-                'bc4b': self._variable_with_weight_decay('bc4b', [512], 0.000),
-                'bc5a': self._variable_with_weight_decay('bc5a', [512], 0.000),
-                'bc5b': self._variable_with_weight_decay('bc5b', [512], 0.000),
-                'bd1': self._variable_with_weight_decay('bd1', [4096], 0.000),
-                'bd2': self._variable_with_weight_decay('bd2', [4096], 0.000),
-                'out': self._variable_with_weight_decay('bout', [self.data.NUM_CLASSES], 0.000),
-            }
-            pass
+        # Net
+        self.logits = net(self.images_placeholder, 0.5, self.data.NUM_CLASSES)
 
-        self.logits = C3D.inference_c3d(self.images_placeholder, 0.5, self.batch_size, self.weights, self.biases)
+        # Output
         self.pred = tf.argmax(self.logits, 1)
         self.loss = self.cal_loss(self.labels_placeholder, self.logits)
         self.accuracy = self.cal_acc(self.pred, self.labels_placeholder)
-        self.train_op = tf.train.AdamOptimizer(1e-4).minimize(self.loss, global_step=self.global_step)
+        self.now_epoch = tf.Variable(tf.constant(0), trainable=False)
+        self.learning_rate = tf.train.piecewise_constant(self.now_epoch, [5, 10], [0.003, 0.001, 0.0001])
+        self.train_op = tf.train.GradientDescentOptimizer(self.learning_rate).minimize(self.loss)
         self.summary_op = tf.summary.merge_all()
 
+        # Sess
         self.sess = tf.Session(config=tf.ConfigProto(gpu_options=tf.GPUOptions(allow_growth=True)))
         self.sess.run(tf.global_variables_initializer())
         self.saver = tf.train.Saver(var_list=tf.global_variables(), max_to_keep=5)
@@ -224,29 +239,30 @@ class TrainC3D(object):
         self.load_model()
         self.test()
 
-        video_generator = data.video_generator(is_train=True)
+        video_generator = self.data.video_generator(is_train=True)
         for epoch in range(self.max_epochs):
             total_acc = 0
             total_loss = 0
-            for step in range(data.train_batch_num):
+            for step in range(self.data.train_batch_num):
                 train_images, train_labels = next(video_generator)
-                _loss, summary, acc, _, _pred = self.sess.run(
-                    [self.loss, self.summary_op, self.accuracy, self.train_op, self.pred],
+                _loss, summary, acc, _, _pred, _learning_rate = self.sess.run(
+                    [self.loss, self.summary_op, self.accuracy, self.train_op, self.pred, self.learning_rate],
                     feed_dict={self.images_placeholder: train_images, self.labels_placeholder: train_labels})
                 total_acc += acc
                 total_loss += _loss
-                self.summary_writer.add_summary(summary, epoch * data.train_batch_num + step)
+                self.summary_writer.add_summary(summary, epoch * self.data.train_batch_num + step)
 
                 if step % 10 == 0:
-                    Tools.print("{}/{} {}/{} acc={:.5f} avg_loss={:.5f} loss={:.5f}".format(
-                        epoch, self.max_epochs, step, data.train_batch_num,
-                        total_acc/(step + 1), total_loss/(step + 1), _loss))
+                    Tools.print("{}/{} {}/{} acc={:.5f} avg_loss={:.5f} loss={:.5f} lr={}".format(
+                        epoch, self.max_epochs, step, self.data.train_batch_num,
+                        total_acc/(step + 1), total_loss/(step + 1), _loss, _learning_rate))
                     Tools.print("Train preds {}".format(_pred))
                     Tools.print("Train label {}".format(train_labels))
                     pass
                 pass
             self.saver.save(self.sess, self.checkpoint_path, global_step=epoch)
             self.test()
+            self.sess.run(self.learning_rate, feed_dict={self.now_epoch: epoch})
             pass
 
         pass
@@ -254,8 +270,8 @@ class TrainC3D(object):
     def test(self):
         step = 0
         total_acc = 0
-        video_generator = data.video_generator(is_train=False)
-        for step in range(data.test_batch_num):
+        video_generator = self.data.video_generator(is_train=False)
+        for step in range(self.data.test_batch_num):
             try:
                 val_images, val_labels = next(video_generator)
                 acc, _pred = self.sess.run([self.accuracy, self.pred], feed_dict={self.images_placeholder: val_images,
@@ -263,7 +279,7 @@ class TrainC3D(object):
                 total_acc += acc
 
                 if step % 10 == 0:
-                    Tools.print("Test {}/{} {:.5f}".format(step, data.test_batch_num, total_acc/(step + 1)))
+                    Tools.print("Test {}/{} {:.5f}".format(step, self.data.test_batch_num, total_acc/(step + 1)))
                     Tools.print("Test preds {}".format(_pred))
                     Tools.print("Test label {}".format(val_labels))
             except StopIteration:
@@ -271,15 +287,6 @@ class TrainC3D(object):
             pass
         Tools.print("Test accuracy: {:.5f}".format(total_acc / step))
         pass
-
-    @staticmethod
-    def _variable_with_weight_decay(name, shape, wd):
-        with tf.device('/cpu:0'):
-            var = tf.get_variable(name, shape, initializer=tf.contrib.layers.xavier_initializer())
-        if wd is not None:
-            weight_decay = tf.nn.l2_loss(var) * wd
-            tf.add_to_collection('weight_decay_losses', weight_decay)
-        return var
 
     @staticmethod
     def cal_acc(preds, labels):
@@ -294,8 +301,8 @@ class TrainC3D(object):
             tf.nn.sparse_softmax_cross_entropy_with_logits(labels=labels, logits=logits))
         weight_decay_loss = tf.reduce_mean(tf.get_collection('weight_decay_losses'))
 
-        # total_loss = cross_entropy_mean + weight_decay_loss
-        total_loss = cross_entropy_mean
+        total_loss = cross_entropy_mean + weight_decay_loss
+        # total_loss = cross_entropy_mean
 
         tf.summary.scalar('loss_cross_entropy', cross_entropy_mean)
         tf.summary.scalar('loss_weight_decay_loss', weight_decay_loss)
@@ -306,12 +313,12 @@ class TrainC3D(object):
     def load_model(self):
         # 加载模型
         ckpt = tf.train.get_checkpoint_state(self.model_dir)
-        pretrain = ckpt.model_checkpoint_path if ckpt and ckpt.model_checkpoint_path else self.pretrain
-        if pretrain:
+        pre_train = ckpt.model_checkpoint_path if ckpt and ckpt.model_checkpoint_path else self.pre_train
+        if pre_train:
             # tf.train.Saver(var_list=tf.global_variables()).restore(sess, ckpt.model_checkpoint_path)
-            slim.assign_from_checkpoint_fn(pretrain, var_list=tf.global_variables(),
+            slim.assign_from_checkpoint_fn(pre_train, var_list=tf.global_variables(),
                                            ignore_missing_vars=True)(self.sess)
-            Tools.print("Restored model parameters from {}".format(pretrain))
+            Tools.print("Restored model parameters from {}".format(pre_train))
         else:
             Tools.print('No checkpoint file found.')
             pass
@@ -322,6 +329,8 @@ class TrainC3D(object):
 
 if __name__ == '__main__':
     os.environ["CUDA_VISIBLE_DEVICES"] = "1"  # 1
-    batch_size = 10
-    data = DataUCF101(train_filename='./list/train.list', test_filename='./list/test.list', batch_size=batch_size)
-    TrainC3D(run_name="first", batch_size=batch_size, max_epochs=50, data=data).train()
+    _batch_size = 10
+    _data = DataUCF101(train_filename='./list/train_1.list',
+                       test_filename='./list/test_1.list', batch_size=_batch_size)
+    TrainC3D(run_name="split_1", batch_size=_batch_size,
+             max_epochs=50, data=_data, net=C3D.inference_c3d).train()
