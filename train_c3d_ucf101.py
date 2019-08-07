@@ -224,7 +224,7 @@ class TrainC3D(object):
         self.loss = self.cal_loss(self.labels_placeholder, self.logits)
         self.accuracy = self.cal_acc(self.pred, self.labels_placeholder)
         self.now_epoch = tf.Variable(tf.constant(0), trainable=False)
-        self.learning_rate = tf.train.piecewise_constant(self.now_epoch, [5, 10], [0.003, 0.001, 0.0001])
+        self.learning_rate = tf.train.piecewise_constant(self.now_epoch, [4, 8, 12], [0.001, 0.0005, 0.0001, 0.00005])
         self.train_op = tf.train.GradientDescentOptimizer(self.learning_rate).minimize(self.loss)
         self.summary_op = tf.summary.merge_all()
 
@@ -253,7 +253,7 @@ class TrainC3D(object):
                 self.summary_writer.add_summary(summary, epoch * self.data.train_batch_num + step)
 
                 if step % 10 == 0:
-                    Tools.print("{}/{} {}/{} acc={:.5f} avg_loss={:.5f} loss={:.5f} lr={}".format(
+                    Tools.print("{}/{} {}/{} acc={:.5f} avg_loss={:.5f} loss={:.5f} lr={:.5f}".format(
                         epoch, self.max_epochs, step, self.data.train_batch_num,
                         total_acc/(step + 1), total_loss/(step + 1), _loss, _learning_rate))
                     Tools.print("Train preds {}".format(_pred))
@@ -332,5 +332,5 @@ if __name__ == '__main__':
     _batch_size = 10
     _data = DataUCF101(train_filename='./list/train_1.list',
                        test_filename='./list/test_1.list', batch_size=_batch_size)
-    TrainC3D(run_name="split_1", batch_size=_batch_size,
-             max_epochs=50, data=_data, net=C3D.inference_c3d).train()
+    TrainC3D(run_name="split_1_weight_decay", batch_size=_batch_size,
+             max_epochs=20, data=_data, net=C3D.inference_c3d).train()
