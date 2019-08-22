@@ -198,8 +198,8 @@ class C3D(object):
 
 class TrainC3D(object):
 
-    def __init__(self, run_name, batch_size, max_epochs, data, net, log_dir='./logs', model_dir="./models",
-                 model_name="./c3d_ucf_model", pre_train=None):
+    def __init__(self, run_name, batch_size, max_epochs, data, net, has_weight_decay=True,
+                 log_dir='./logs', model_dir="./models", model_name="./c3d_ucf_model", pre_train=None):
         self.run_name = run_name
         self.model_name = model_name
         self.model_dir = Tools.new_dir(os.path.join(model_dir, self.run_name))
@@ -210,6 +210,7 @@ class TrainC3D(object):
         self.data = data
         self.batch_size = batch_size
         self.max_epochs = max_epochs
+        self.has_weight_decay = has_weight_decay
 
         # Input
         _shape = (batch_size, self.data.FRAMES, self.data.CROP_SIZE, self.data.CROP_SIZE, self.data.CHANNELS)
@@ -221,11 +222,16 @@ class TrainC3D(object):
 
         # Output
         self.pred = tf.argmax(self.logits, 1)
-        self.loss = self.cal_loss(self.labels_placeholder, self.logits)
+        self.loss = self.cal_loss(self.labels_placeholder, self.logits, self.has_weight_decay)
         self.accuracy = self.cal_acc(self.pred, self.labels_placeholder)
-        self.now_epoch = tf.Variable(tf.constant(0), trainable=False)
-        self.learning_rate = tf.train.piecewise_constant(self.now_epoch, [4, 8, 12], [0.001, 0.0005, 0.0001, 0.00005])
-        self.train_op = tf.train.GradientDescentOptimizer(self.learning_rate).minimize(self.loss)
+
+        # learning rate
+        self.now_epoch = tf.Variable(0, trainable=False, name="epoch")
+        self.add_epoch_op = tf.assign_add(self.now_epoch, 1)
+        self.learning_rate = tf.train.piecewise_constant(self.now_epoch, [10, 20],
+                                                         [0.0001, 0.00005, 0.00001])
+
+        self.train_op = tf.train.AdamOptimizer(self.learning_rate).minimize(self.loss)
         self.summary_op = tf.summary.merge_all()
 
         # Sess
@@ -240,7 +246,8 @@ class TrainC3D(object):
         self.test()
 
         video_generator = self.data.video_generator(is_train=True)
-        for epoch in range(self.max_epochs):
+        start_epoch = self.sess.run(self.now_epoch)
+        for epoch in range(start_epoch, self.max_epochs):
             total_acc = 0
             total_loss = 0
             for step in range(self.data.train_batch_num):
@@ -252,7 +259,7 @@ class TrainC3D(object):
                 total_loss += _loss
                 self.summary_writer.add_summary(summary, epoch * self.data.train_batch_num + step)
 
-                if step % 10 == 0:
+                if step % 50 == 0:
                     Tools.print("{}/{} {}/{} acc={:.5f} avg_loss={:.5f} loss={:.5f} lr={:.5f}".format(
                         epoch, self.max_epochs, step, self.data.train_batch_num,
                         total_acc/(step + 1), total_loss/(step + 1), _loss, _learning_rate))
@@ -260,9 +267,9 @@ class TrainC3D(object):
                     Tools.print("Train label {}".format(train_labels))
                     pass
                 pass
+            self.sess.run(self.add_epoch_op)  # for learning rate
             self.saver.save(self.sess, self.checkpoint_path, global_step=epoch)
             self.test()
-            self.sess.run(self.learning_rate, feed_dict={self.now_epoch: epoch})
             pass
 
         pass
@@ -278,7 +285,7 @@ class TrainC3D(object):
                                                                                   self.labels_placeholder: val_labels})
                 total_acc += acc
 
-                if step % 10 == 0:
+                if step % 50 == 0:
                     Tools.print("Test {}/{} {:.5f}".format(step, self.data.test_batch_num, total_acc/(step + 1)))
                     Tools.print("Test preds {}".format(_pred))
                     Tools.print("Test label {}".format(val_labels))
@@ -296,19 +303,17 @@ class TrainC3D(object):
         return accuracy
 
     @staticmethod
-    def cal_loss(labels, logits):
+    def cal_loss(labels, logits, has_weight_decay):
         cross_entropy_mean = tf.reduce_mean(
             tf.nn.sparse_softmax_cross_entropy_with_logits(labels=labels, logits=logits))
         weight_decay_loss = tf.reduce_mean(tf.get_collection('weight_decay_losses'))
-
-        total_loss = cross_entropy_mean + weight_decay_loss
-        # total_loss = cross_entropy_mean
+        loss = cross_entropy_mean + weight_decay_loss if has_weight_decay else cross_entropy_mean
 
         tf.summary.scalar('loss_cross_entropy', cross_entropy_mean)
         tf.summary.scalar('loss_weight_decay_loss', weight_decay_loss)
-        tf.summary.scalar('loss_total_loss', total_loss)
+        tf.summary.scalar('loss_total_loss', loss)
 
-        return total_loss
+        return loss
 
     def load_model(self):
         # 加载模型
@@ -328,9 +333,11 @@ class TrainC3D(object):
 
 
 if __name__ == '__main__':
-    os.environ["CUDA_VISIBLE_DEVICES"] = "1"  # 1
+    os.environ["CUDA_VISIBLE_DEVICES"] = "0"  # 1
     _batch_size = 10
-    _data = DataUCF101(train_filename='./list/train_1.list',
-                       test_filename='./list/test_1.list', batch_size=_batch_size)
-    TrainC3D(run_name="split_1_weight_decay", batch_size=_batch_size,
-             max_epochs=20, data=_data, net=C3D.inference_c3d).train()
+    _has_weight_decay = False
+    _data = DataUCF101(train_filename='./list/train_first.list',
+                       test_filename='./list/test_first.list', batch_size=_batch_size)
+    TrainC3D(run_name="split_first{}".format("_weight_decay" if _has_weight_decay else ""),
+             batch_size=_batch_size, max_epochs=40, data=_data,
+             net=C3D.inference_c3d, has_weight_decay=_has_weight_decay).train()
